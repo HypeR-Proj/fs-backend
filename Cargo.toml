@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+[package]
+workspace = "../../app"
+name = "hyper-fs-backend-system"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+[[bin]]
+name = "hyper-fs-backend-system"
+path = "src/main.rs"
+test = false
+bench = false
+[dependencies]
+hyper-block.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hyper-os = { workspace = true, features = ["std"] }
+hyper-rt.workspace = true
+hyper-service.workspace = true
+hyper-filesystem.workspace = true
+[lints]
+workspace = true
+
+[lib]
+name = "hyper_fs_backend"
