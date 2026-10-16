@@ -81,6 +81,7 @@ pub(super) fn adopt(manager: &mut Manager<'_>) -> Result<AdoptedManager, String>
             let mut worker = Worker::prepare(
                 &manager.startup,
                 &manager.root,
+                &manager.monitor,
                 program,
                 format,
                 geometry,

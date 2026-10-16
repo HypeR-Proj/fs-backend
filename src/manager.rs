@@ -33,6 +33,7 @@ pub(super) struct Manager<'a> {
     pub root: Directory,
     pub environment: Directory,
     pub volumes: Vec<Volume>,
+    pub monitor: crate::monitor::Monitor,
 }
 impl Manager<'_> {
     fn load_table(&self, table: &str) -> Result<Vec<Entry>, String> {
@@ -45,17 +46,23 @@ impl Manager<'_> {
     fn mount_all(&mut self, entries: &[Entry]) -> Result<String, String> {
         let mut failures = Vec::new();
         for entry in entries.iter().filter(|entry| entry.automatic) {
-            if self.volumes.iter().any(|volume| {
-                volume.matches(&entry.source)
-                    && volume.worker.as_ref().is_some_and(|worker| {
+            let existing = self.volumes.iter().find_map(|volume| {
+                volume
+                    .matches(&entry.source)
+                    .then_some(volume)
+                    .and_then(|volume| volume.worker.as_ref())
+                    .filter(|worker| {
                         worker.target == entry.target
                             && worker.read_only == entry.read_only
                             && entry.format.is_none_or(|format| worker.format == format)
                     })
-            }) {
-                continue;
-            }
-            if let Err(error) = self.mount(entry) {
+            });
+            let result = if let Some(worker) = existing {
+                worker.observation.require_running()
+            } else {
+                self.mount(entry)
+            };
+            if let Err(error) = result {
                 eprintln!(
                     "HypeR fs-backend: {} on {}: {error}",
                     entry.source, entry.target
@@ -148,6 +155,7 @@ impl Manager<'_> {
         let mut worker = Worker::start(
             &self.startup,
             &self.root,
+            &self.monitor,
             program,
             format,
             volume.geometry,
@@ -213,7 +221,7 @@ impl Manager<'_> {
                         use std::fmt::Write;
                         writeln!(
                             output,
-                            "{} on {} type {} ({})",
+                            "{} on {} type {} ({}) {}",
                             format_args!("PARTUUID={}", volume.id),
                             if worker.mount_id == Some(root_mount) {
                                 "/"
@@ -221,7 +229,8 @@ impl Manager<'_> {
                                 &worker.target
                             },
                             worker.format.name().to_ascii_lowercase(),
-                            if worker.read_only { "ro" } else { "rw" }
+                            if worker.read_only { "ro" } else { "rw" },
+                            worker.observation.detail()?
                         )
                         .map_err(show)?;
                     }

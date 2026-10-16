@@ -6,6 +6,7 @@
 
 mod manager;
 mod migration;
+mod monitor;
 mod process;
 
 use hyper_fs_backend::format;
@@ -56,11 +57,13 @@ fn run() -> Result<(), String> {
             .take(hyper_service::process::ENVIRONMENT_DIRECTORY)
             .map_err(show)?,
     );
+    let monitor = monitor::Monitor::start(&startup)?;
     let mut manager = manager::Manager {
         startup,
         root,
         environment,
         volumes: Vec::new(),
+        monitor,
     };
     let adoption = migration::adopt(&mut manager)?;
     let control = &adoption.control;

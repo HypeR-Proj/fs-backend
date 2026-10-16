@@ -21,6 +21,7 @@ hyper-os = { workspace = true, features = ["std"] }
 hyper-rt.workspace = true
 hyper-service.workspace = true
 hyper-filesystem.workspace = true
+hyper-component.workspace = true
 [lints]
 workspace = true
 

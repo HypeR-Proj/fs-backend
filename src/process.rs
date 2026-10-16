@@ -5,6 +5,7 @@
 //! clean return transfers the original `NativeBlock` only after namespace detach.
 
 use crate::format::Format;
+use crate::monitor::{Monitor, Registration};
 use crate::{deadline, filesystem_error, show};
 use core::mem::MaybeUninit;
 use hyper_fs_backend::fstab::Entry;
@@ -23,6 +24,7 @@ use hyper_os::{
     },
 };
 use hyper_service::filesystem;
+use std::sync::Arc;
 
 const LIMITS: ResourceLimits = ResourceLimits {
     kernel_memory_bytes: 64 * 1024 * 1024,
@@ -47,7 +49,8 @@ const LIMITS: ResourceLimits = ResourceLimits {
 };
 
 pub(super) struct Worker {
-    pub(super) child: OwnedHandle<ProcessObject>,
+    pub(super) child: Arc<OwnedHandle<ProcessObject>>,
+    pub(super) observation: Registration,
     _group: OwnedHandle<TaskGroupObject>,
     _domain: OwnedHandle<ResourceDomainObject>,
     pub(super) control: CapabilityChannel,
@@ -61,9 +64,11 @@ pub(super) struct Worker {
     pub read_only: bool,
 }
 impl Worker {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         startup: &Startup<'_>,
         root: &Directory,
+        monitor: &Monitor,
         program: Program<File>,
         format: Format,
         geometry: VolumeInfo,
@@ -71,25 +76,27 @@ impl Worker {
         block: &mut Option<NativeBlock>,
     ) -> Result<Self, String> {
         Self::launch(
-            startup, root, program, format, geometry, entry, block, false,
+            startup, root, monitor, program, format, geometry, entry, block, false,
         )
     }
     pub(super) fn prepare(
         startup: &Startup<'_>,
         root: &Directory,
+        monitor: &Monitor,
         program: Program<File>,
         format: Format,
         geometry: VolumeInfo,
         entry: &Entry,
     ) -> Result<Self, String> {
         Self::launch(
-            startup, root, program, format, geometry, entry, &mut None, true,
+            startup, root, monitor, program, format, geometry, entry, &mut None, true,
         )
     }
     #[allow(clippy::too_many_arguments)]
     fn launch(
         startup: &Startup<'_>,
         root: &Directory,
+        monitor: &Monitor,
         program: Program<File>,
         format: Format,
         geometry: VolumeInfo,
@@ -97,6 +104,7 @@ impl Worker {
         block: &mut Option<NativeBlock>,
         adopting: bool,
     ) -> Result<Self, String> {
+        monitor.check_capacity()?;
         let Program {
             path,
             source,
@@ -230,10 +238,19 @@ impl Worker {
             }
         }
         builder.seal().map_err(show)?;
-        let child = builder
-            .start()
-            .map_err(|failure| format!("worker start failed: {:?}", failure.error()))?;
-        let prepared = (|| {
+        let child = Arc::new(
+            builder
+                .start()
+                .map_err(|failure| format!("worker start failed: {:?}", failure.error()))?,
+        );
+        let observation = match monitor.register(child.clone(), format, &entry.target) {
+            Ok(observation) => observation,
+            Err(error) => {
+                let _ = child.as_process_supervisor().request_stop();
+                return Err(error);
+            }
+        };
+        let prepared = (|| -> Result<_, String> {
             let mut bytes = [MaybeUninit::uninit(); 16];
             let mut slots = [
                 CapabilityReceiveSlot::new::<ByteChannelObject>(filesystem::TRANSPORT_RIGHTS),
@@ -265,15 +282,19 @@ impl Worker {
         let (channel, buffer) = match prepared {
             Ok(value) => value,
             Err(error) => {
+                // Capture spontaneous termination before cleanup requests could
+                // otherwise replace an absent reason with Requested.
+                let detail = observation.detail().unwrap_or_else(|failure| failure);
                 drop(owner);
                 drop(control);
                 let _ = child.as_process_supervisor().request_stop();
                 let _ = child.as_process_supervisor().wait_terminated(deadline()?);
-                return Err(error);
+                return Err(format!("{error}; {detail}"));
             }
         };
         Ok(Self {
             child,
+            observation,
             _group: group,
             _domain: domain,
             control,
@@ -362,6 +383,7 @@ impl Worker {
     }
 
     pub fn finish(self) -> Result<NativeBlock, String> {
+        self.observation.begin_stop()?;
         self.owner
             .as_byte_channel()
             .send(filesystem::WORKER_STOP)
