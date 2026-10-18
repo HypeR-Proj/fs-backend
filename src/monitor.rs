@@ -24,10 +24,13 @@ struct State {
     terminal: Option<ProcessTermination>,
     logged: Option<String>,
     reported: Option<String>,
+    notified: Option<String>,
+    retention: Option<String>,
 }
 
 pub(super) struct Observation {
     process: Arc<OwnedHandle<ProcessObject>>,
+    retirement: hyper_os::task::ProcessRetirement,
     name: &'static str,
     target: String,
     koid: u64,
@@ -45,6 +48,19 @@ impl Observation {
         if state.terminal.is_none() {
             state.terminal = info.terminal;
         }
+        if info.terminal.is_some() && state.retention.is_none() {
+            let retained = self.retirement.info().map_err(show)?;
+            if retained.ready() || retained.released() {
+                self.retirement.release().map_err(show)?;
+                state.retention = Some(format!(
+                    "fault={} pc=0x{:x} address=0x{:x} retained={} bytes",
+                    retained.fault_class,
+                    retained.fault_pc,
+                    retained.fault_address,
+                    retained.retained_bytes,
+                ));
+            }
+        }
         Ok(info)
     }
 
@@ -59,7 +75,15 @@ impl Observation {
     pub fn detail(&self) -> Result<String, String> {
         let info = self.info()?;
         Ok(match info.terminal {
-            Some(reason) => format!("failed: {}", self.failure(reason)),
+            Some(reason) => {
+                let retained = self.state.lock().map_err(show)?.retention.clone();
+                let mut detail = format!("failed: {}", self.failure(reason));
+                if let Some(retained) = retained {
+                    detail.push_str("; ");
+                    detail.push_str(&retained);
+                }
+                detail
+            }
             None => format!("worker={} process=0x{:x} running", self.name, self.koid),
         })
     }
@@ -104,8 +128,11 @@ impl Observation {
         let failure = self.unexpected()?;
         let state = self.state.lock().map_err(show)?;
         Ok(state.terminal.is_some()
+            && state.retention.is_some()
             && failure.as_ref().is_none_or(|failure| {
-                state.logged.as_ref() == Some(failure) && state.reported.as_ref() == Some(failure)
+                state.logged.as_ref() == Some(failure)
+                    && state.reported.as_ref() == Some(failure)
+                    && state.notified.as_ref() == Some(failure)
             }))
     }
 }
@@ -168,12 +195,14 @@ impl Monitor {
     pub fn register(
         &self,
         process: Arc<OwnedHandle<ProcessObject>>,
+        retirement: hyper_os::task::ProcessRetirement,
         format: Format,
         target: &str,
     ) -> Result<Registration, String> {
         let observation = Arc::new(Observation {
             koid: process.basic_info().map_err(show)?.koid.get(),
             process,
+            retirement,
             name: format.worker_name(),
             // Component status is bounded to 256 characters; preserve room for
             // the process identity and termination reason even for a long path.
@@ -223,6 +252,11 @@ fn observe(
                 Ok(info) => {
                     if info.terminal.is_none() {
                         live.push(worker.process.clone());
+                    } else if worker.state.lock().map_err(show)?.retention.is_none() {
+                        // TERMINATED precedes the reaper's diagnostic capture.
+                        // Keep polling until it is ready or the bounded lease
+                        // expires, without waiting for a new mount-control call.
+                        retry = true;
                     }
                     worker.unexpected()?
                 }
@@ -238,6 +272,22 @@ fn observe(
             };
             if let Some(failure) = failure {
                 failures.push((worker, failure.clone()));
+                let notified =
+                    worker.state.lock().map_err(show)?.notified.as_ref() == Some(&failure);
+                if !notified {
+                    // The parent manager retains a direct Console path even
+                    // when the root filesystem or journal has failed.
+                    if hyper_component::connection::report_failure(
+                        connector.as_handle_ref(),
+                        &failure,
+                    )
+                    .is_ok()
+                    {
+                        worker.state.lock().map_err(show)?.notified = Some(failure.clone());
+                    } else {
+                        retry = true;
+                    }
+                }
                 let sent = worker.state.lock().map_err(show)?.logged.as_ref() == Some(&failure);
                 if !sent {
                     let record = format!("HypeR fs-backend: {failure}\n");

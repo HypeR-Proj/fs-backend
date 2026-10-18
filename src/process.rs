@@ -237,13 +237,16 @@ impl Worker {
                 return Err(show(error));
             }
         }
+        let retirement = builder
+            .retain_on_exit(8 * 1024 * 1024, 10_000_000_000)
+            .map_err(show)?;
         builder.seal().map_err(show)?;
         let child = Arc::new(
             builder
                 .start()
                 .map_err(|failure| format!("worker start failed: {:?}", failure.error()))?,
         );
-        let observation = match monitor.register(child.clone(), format, &entry.target) {
+        let observation = match monitor.register(child.clone(), retirement, format, &entry.target) {
             Ok(observation) => observation,
             Err(error) => {
                 let _ = child.as_process_supervisor().request_stop();
