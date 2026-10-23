@@ -155,6 +155,14 @@ impl Worker {
         )
         .map_err(show)?;
         builder.set_name(format.worker_name()).map_err(show)?;
+        // Providers execute this service's work. Keep their treatment explicit;
+        // ordinary process creation remains the App scheduling boundary.
+        builder
+            .set_scheduling(
+                hyper_os::scheduling::current().map_err(show)?,
+                Rights::SCHED_LOWER,
+            )
+            .map_err(show)?;
         // The worker locks its own current mappings before announcing READY.
         // No process-wide future-allocation policy is implied by this permission.
         builder.set_memory_lock_allowed(true).map_err(show)?;
