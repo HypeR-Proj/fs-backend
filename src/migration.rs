@@ -14,8 +14,8 @@ use hyper_os::{
     block::{NativeBlock, VolumeInfo},
     capability_channel::{CapabilityChannel, CapabilityDisposition, CapabilityReceiveSlot},
     handle::{
-        ByteChannelObject, CapabilityChannelObject, NativeBlockObject, OwnedHandle, ProcessObject,
-        Rights, RightsOffer, VmoObject,
+        BlockQueueObject, ByteChannelObject, CapabilityChannelObject, NativeBlockObject,
+        OwnedHandle, ProcessObject, Rights, RightsOffer, VmoObject,
     },
     memory::SnapshotVmo,
     startup::StartupPurpose,
@@ -113,19 +113,21 @@ pub(super) fn adopt(manager: &mut Manager<'_>) -> Result<AdoptedManager, String>
                 CapabilityReceiveSlot::new::<ByteChannelObject>(filesystem::TRANSPORT_RIGHTS),
                 CapabilityReceiveSlot::new::<VmoObject>(filesystem::BUFFER_RIGHTS),
                 CapabilityReceiveSlot::new::<ProcessObject>(transfer::PROCESS_RIGHTS),
+                CapabilityReceiveSlot::new::<BlockQueueObject>(filesystem::QUEUE_RIGHTS),
             ];
             let message = endpoint
                 .receive(deadline()?, &mut bytes, &mut slots)
                 .map_err(show)?;
             if message.bytes().len() != 16
                 || &message.bytes()[..8] != filesystem::WORKER_STATE
-                || message.capability_count() != 6
+                || message.capability_count() != 7
             {
                 return Err("invalid mounted filesystem transfer".into());
             }
             let mut block = slots[0].take::<NativeBlockObject>().map_err(show)?;
             let mut server = slots[1].take::<ByteChannelObject>().map_err(show)?;
             let mut shared = slots[2].take::<VmoObject>().map_err(show)?;
+            let mut queue = slots[6].take::<BlockQueueObject>().map_err(show)?;
             let channel = slots[3]
                 .take::<ByteChannelObject>()
                 .map_err(show)?
@@ -143,8 +145,8 @@ pub(super) fn adopt(manager: &mut Manager<'_>) -> Result<AdoptedManager, String>
                 &mut block,
                 &mut server,
                 &mut shared,
-                channel,
-                buffer,
+                &mut queue,
+                (channel, buffer),
             )?;
             predecessors.push(Some(process));
         } else {

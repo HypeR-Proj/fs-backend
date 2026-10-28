@@ -15,8 +15,8 @@ use hyper_os::{
     capability_channel::{CapabilityChannel, CapabilityReceiveSlot},
     fs::{Directory, File},
     handle::{
-        ByteChannelObject, NativeBlockObject, OwnedHandle, ProcessObject, ResourceDomainObject,
-        Rights, RightsOffer, TaskGroupObject, VmoObject,
+        BlockQueueObject, ByteChannelObject, NativeBlockObject, OwnedHandle, ProcessObject,
+        ResourceDomainObject, Rights, RightsOffer, TaskGroupObject, VmoObject,
     },
     startup::{self, Startup},
     task::{
@@ -57,6 +57,7 @@ pub(super) struct Worker {
     pub(super) owner: OwnedHandle<ByteChannelObject>,
     pub(super) channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) buffer: Option<OwnedHandle<VmoObject>>,
+    pub(super) queue: Option<OwnedHandle<BlockQueueObject>>,
     pub(super) published: bool,
     pub(super) mount_id: Option<u64>,
     pub target: String,
@@ -266,6 +267,7 @@ impl Worker {
             let mut slots = [
                 CapabilityReceiveSlot::new::<ByteChannelObject>(filesystem::TRANSPORT_RIGHTS),
                 CapabilityReceiveSlot::new::<VmoObject>(filesystem::BUFFER_RIGHTS),
+                CapabilityReceiveSlot::new::<BlockQueueObject>(filesystem::QUEUE_RIGHTS),
             ];
             let message = control
                 .receive(deadline()?, &mut bytes, &mut slots)
@@ -275,9 +277,9 @@ impl Worker {
                 {
                     return Err("invalid filesystem adoption preparation".into());
                 }
-                return Ok((None, None));
+                return Ok((None, None, None));
             }
-            if message.bytes() != filesystem::WORKER_READY || message.capability_count() != 2 {
+            if message.bytes() != filesystem::WORKER_READY || message.capability_count() != 3 {
                 return Err("invalid filesystem worker handshake".into());
             }
             let channel = slots[0]
@@ -288,9 +290,13 @@ impl Worker {
                 .take::<VmoObject>()
                 .map_err(show)?
                 .ok_or("missing filesystem buffer")?;
-            Ok((Some(channel), Some(buffer)))
+            let queue = slots[2]
+                .take::<BlockQueueObject>()
+                .map_err(show)?
+                .ok_or("missing filesystem block queue")?;
+            Ok((Some(channel), Some(buffer), Some(queue)))
         })();
-        let (channel, buffer) = match prepared {
+        let (channel, buffer, queue) = match prepared {
             Ok(value) => value,
             Err(error) => {
                 // Capture spontaneous termination before cleanup requests could
@@ -312,6 +318,7 @@ impl Worker {
             owner,
             channel,
             buffer,
+            queue,
             published: false,
             mount_id: None,
             target: entry.target.clone(),
@@ -329,6 +336,12 @@ impl Worker {
                 .as_ref()
                 .ok_or("missing filesystem buffer")?
                 .as_handle_ref(),
+            Some(
+                self.queue
+                    .as_ref()
+                    .ok_or("missing filesystem block queue")?
+                    .as_handle_ref(),
+            ),
             root.as_handle_ref(),
             &self.target,
             read_only,
@@ -360,10 +373,15 @@ impl Worker {
         block: &mut Option<OwnedHandle<NativeBlockObject>>,
         server: &mut Option<OwnedHandle<ByteChannelObject>>,
         shared: &mut Option<OwnedHandle<VmoObject>>,
-        channel: OwnedHandle<ByteChannelObject>,
-        buffer: OwnedHandle<VmoObject>,
+        queue: &mut Option<OwnedHandle<BlockQueueObject>>,
+        client: (OwnedHandle<ByteChannelObject>, OwnedHandle<VmoObject>),
     ) -> Result<(), String> {
         use hyper_os::capability_channel::CapabilityDisposition;
+        let retained_queue = queue
+            .as_ref()
+            .ok_or("missing adopted block queue")?
+            .duplicate(filesystem::QUEUE_RIGHTS)
+            .map_err(show)?;
         let mut offers = [
             CapabilityDisposition::move_handle(block, RightsOffer::Exact(hyper_os::block::RIGHTS))
                 .map_err(show)?,
@@ -377,6 +395,8 @@ impl Worker {
                 RightsOffer::Exact(filesystem::SERVER_BUFFER_RIGHTS),
             )
             .map_err(show)?,
+            CapabilityDisposition::move_handle(queue, RightsOffer::Exact(filesystem::QUEUE_RIGHTS))
+                .map_err(show)?,
         ];
         hyper_service::io::send_capabilities(&self.control, record, &mut offers, deadline()?)
             .map_err(show)?;
@@ -388,8 +408,9 @@ impl Worker {
         if reply.bytes() != filesystem::WORKER_RESUMED || reply.capability_count() != 0 {
             return Err("filesystem worker failed to adopt transport".into());
         }
-        self.channel = Some(channel);
-        self.buffer = Some(buffer);
+        self.channel = Some(client.0);
+        self.buffer = Some(client.1);
+        self.queue = Some(retained_queue);
         Ok(())
     }
 
