@@ -35,5 +35,45 @@
       "app-test",
       "APP_TEST_PACKAGE=hyper-fs-backend-system"
     ]
-  ]
+  ],
+  "cargo_context": {
+    "Cargo.toml": {
+      "workspace": null,
+      "membership": "../../app",
+      "dependency_paths": {
+        "/dependencies/hyper-block": "lib/block",
+        "/dependencies/hyper-service": "lib/service",
+        "/dependencies/hyper-component": "lib/component"
+      },
+      "inherited_dependencies": {
+        "/dependencies/hyper-block": {
+          "workspace": true
+        },
+        "/dependencies/serde": {
+          "workspace": true
+        },
+        "/dependencies/serde_json": {
+          "workspace": true
+        },
+        "/dependencies/hyper-os": {
+          "workspace": true,
+          "features": [
+            "std"
+          ]
+        },
+        "/dependencies/hyper-rt": {
+          "workspace": true
+        },
+        "/dependencies/hyper-service": {
+          "workspace": true
+        },
+        "/dependencies/hyper-filesystem": {
+          "workspace": true
+        },
+        "/dependencies/hyper-component": {
+          "workspace": true
+        }
+      }
+    }
+  }
 }
