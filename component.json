@@ -1,30 +1,12 @@
 {
+  "SPDX-FileCopyrightText": "2026 roolrz",
+  "SPDX-License-Identifier": "Apache-2.0",
   "version": 1,
   "name": "fs-backend",
   "kind": "service",
   "origin": {
     "repository": "https://github.com/roolrz/HypeR",
     "commit": "8d42d047058a2b58a291803700e86487fb723f7a"
-  },
-  "sources": {
-    "Cargo.toml": "svc/fs-backend/Cargo.toml",
-    "component.mk": "svc/fs-backend/component.mk",
-    "src/config.rs": "svc/fs-backend/src/config.rs",
-    "src/format.rs": "svc/fs-backend/src/format.rs",
-    "src/fstab.rs": "svc/fs-backend/src/fstab.rs",
-    "src/lib.rs": "svc/fs-backend/src/lib.rs",
-    "src/main.rs": "svc/fs-backend/src/main.rs",
-    "src/manager.rs": "svc/fs-backend/src/manager.rs",
-    "src/migration.rs": "svc/fs-backend/src/migration.rs",
-    "src/monitor.rs": "svc/fs-backend/src/monitor.rs",
-    "src/process.rs": "svc/fs-backend/src/process.rs",
-    "src/transfer.rs": "svc/fs-backend/src/transfer.rs",
-    "src/worker.rs": "svc/fs-backend/src/worker.rs"
-  },
-  "SPDX-FileCopyrightText": "2026 roolrz",
-  "SPDX-License-Identifier": "Apache-2.0",
-  "mounts": {
-    "": "svc/fs-backend"
   },
   "packages": [
     "hyper-fs-backend-system"
@@ -35,45 +17,5 @@
       "app-test",
       "APP_TEST_PACKAGE=hyper-fs-backend-system"
     ]
-  ],
-  "cargo_context": {
-    "Cargo.toml": {
-      "workspace": null,
-      "membership": "../../app",
-      "dependency_paths": {
-        "/dependencies/hyper-block": "lib/block",
-        "/dependencies/hyper-service": "lib/service",
-        "/dependencies/hyper-component": "lib/component"
-      },
-      "inherited_dependencies": {
-        "/dependencies/hyper-block": {
-          "workspace": true
-        },
-        "/dependencies/serde": {
-          "workspace": true
-        },
-        "/dependencies/serde_json": {
-          "workspace": true
-        },
-        "/dependencies/hyper-os": {
-          "workspace": true,
-          "features": [
-            "std"
-          ]
-        },
-        "/dependencies/hyper-rt": {
-          "workspace": true
-        },
-        "/dependencies/hyper-service": {
-          "workspace": true
-        },
-        "/dependencies/hyper-filesystem": {
-          "workspace": true
-        },
-        "/dependencies/hyper-component": {
-          "workspace": true
-        }
-      }
-    }
-  }
+  ]
 }
