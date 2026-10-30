@@ -26,6 +26,7 @@ pub fn format(name: &str) -> Result<Option<Format>, String> {
         "auto" => Ok(None),
         "fat" | "vfat" => Ok(Some(Format::Fat)),
         "erofs" => Ok(Some(Format::Erofs)),
+        "f2fs" => Ok(Some(Format::F2fs)),
         _ => Err(format!("unsupported filesystem type: {name}")),
     }
 }

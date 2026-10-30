@@ -79,20 +79,27 @@ mod tests {
 
     #[test]
     fn recognized_missing_worker_is_not_an_unknown_format() -> Result<(), String> {
-        let mut probe = [0; PROBE_BYTES];
-        assert_eq!(identify(&probe), None);
-        probe[1024..1028].copy_from_slice(&0xe0f5_e1e2u32.to_le_bytes());
-        let format = identify(&probe).ok_or("EROFS was not recognized")?;
-        let result = open::<()>(&split_config(), format, "/system", |_, _| {
-            Err(Error::Status(Status::NOT_FOUND))
-        });
-        let Err(error) = result else {
-            return Err("missing worker was accepted".into());
-        };
-        assert_eq!(
-            error,
-            "EROFS recognized for /system, but filesystem worker is unavailable; tried: Environment:svc/fs-erofs, Namespace:/system/svc/fs-erofs"
-        );
+        for (magic, name, worker) in [
+            (0xe0f5_e1e2u32, "EROFS", "fs-erofs"),
+            (0xf2f5_2010u32, "F2FS", "fs-f2fs"),
+        ] {
+            let mut probe = [0; PROBE_BYTES];
+            assert_eq!(identify(&probe), None);
+            probe[1024..1028].copy_from_slice(&magic.to_le_bytes());
+            let format = identify(&probe).ok_or("filesystem was not recognized")?;
+            let result = open::<()>(&split_config(), format, "/system", |_, _| {
+                Err(Error::Status(Status::NOT_FOUND))
+            });
+            let Err(error) = result else {
+                return Err("missing worker was accepted".into());
+            };
+            assert_eq!(
+                error,
+                format!(
+                    "{name} recognized for /system, but filesystem worker is unavailable; tried: Environment:svc/{worker}, Namespace:/system/svc/{worker}"
+                )
+            );
+        }
         Ok(())
     }
 

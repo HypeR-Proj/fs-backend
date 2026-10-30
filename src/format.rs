@@ -4,13 +4,14 @@
 //! Bounded format hints used to select a trusted filesystem worker executable.
 //! `NativeBlock` already identifies a logical volume; this does not scan partitions.
 
-/// Whole-sector prefix covering the FAT boot sector and EROFS superblock magic.
+/// Whole-sector prefix covering the FAT boot sector and EROFS/F2FS superblock magic.
 pub const PROBE_BYTES: usize = 3 * 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     Fat,
     Erofs,
+    F2fs,
 }
 
 impl Format {
@@ -18,6 +19,7 @@ impl Format {
         match self {
             Self::Fat => "FAT",
             Self::Erofs => "EROFS",
+            Self::F2fs => "F2FS",
         }
     }
 
@@ -25,6 +27,7 @@ impl Format {
         match self {
             Self::Fat => "fs-fat",
             Self::Erofs => "fs-erofs",
+            Self::F2fs => "fs-f2fs",
         }
     }
 }
@@ -36,9 +39,11 @@ pub fn identify(prefix: &[u8]) -> Option<Format> {
     // EROFS reserves the first KiB and stores its little-endian magic at the
     // start of the superblock. No EROFS implementation is linked into this probe.
     let erofs = prefix.get(1024..1028) == Some(&0xe0f5_e1e2u32.to_le_bytes());
-    match (fat_geometry(prefix), erofs) {
-        (true, false) => Some(Format::Fat),
-        (false, true) => Some(Format::Erofs),
+    let f2fs = prefix.get(1024..1028) == Some(&0xf2f5_2010u32.to_le_bytes());
+    match (fat_geometry(prefix), erofs, f2fs) {
+        (true, false, false) => Some(Format::Fat),
+        (false, true, false) => Some(Format::Erofs),
+        (false, false, true) => Some(Format::F2fs),
         _ => None,
     }
 }
@@ -121,6 +126,17 @@ mod tests {
     }
 
     #[test]
+    fn f2fs_recognition_requires_complete_little_endian_superblock_magic() {
+        let mut prefix = [0; PROBE_BYTES];
+        prefix[1024..1028].copy_from_slice(&0xf2f5_2010u32.to_be_bytes());
+        assert_eq!(identify(&prefix), None);
+        prefix[1024..1028].copy_from_slice(&0xf2f5_2010u32.to_le_bytes());
+        assert_eq!(identify(&prefix), Some(Format::F2fs));
+        assert_eq!(identify(&prefix[..1027]), None);
+        assert_eq!(Format::F2fs.worker_name(), "fs-f2fs");
+    }
+
+    #[test]
     fn ambiguous_format_hints_do_not_select_a_worker() {
         let mut prefix = [0; PROBE_BYTES];
         prefix[11..13].copy_from_slice(&512u16.to_le_bytes());
@@ -131,7 +147,9 @@ mod tests {
         prefix[36..40].copy_from_slice(&600u32.to_le_bytes());
         prefix[510..512].copy_from_slice(&[0x55, 0xaa]);
         assert_eq!(identify(&prefix), Some(Format::Fat));
-        prefix[1024..1028].copy_from_slice(&0xe0f5_e1e2u32.to_le_bytes());
-        assert_eq!(identify(&prefix), None);
+        for magic in [0xe0f5_e1e2u32, 0xf2f5_2010u32] {
+            prefix[1024..1028].copy_from_slice(&magic.to_le_bytes());
+            assert_eq!(identify(&prefix), None);
+        }
     }
 }
