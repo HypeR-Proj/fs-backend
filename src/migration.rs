@@ -60,6 +60,7 @@ pub(super) fn adopt(manager: &mut Manager<'_>) -> Result<AdoptedManager, String>
             let format = match mount.format.as_str() {
                 "fat" => Format::Fat,
                 "erofs" => Format::Erofs,
+                "f2fs" => Format::F2fs,
                 _ => return Err("unsupported adopted filesystem format".into()),
             };
             let target = adopted_target(&manager.root, &mount)?;

@@ -114,7 +114,18 @@ impl Worker {
         let factory = startup.borrow(startup::TASK_FACTORY).map_err(show)?;
         let domain = create_resource_domain(
             startup.borrow(startup::RESOURCE_DOMAIN).map_err(show)?,
-            LIMITS,
+            if format == crate::format::Format::F2fs {
+                // The page cache and two staging pools allocate many independent
+                // heap regions. Keep the existing byte/page ceilings, but admit
+                // their VMO/mapping objects within that same bounded memory.
+                ResourceLimits {
+                    kernel_objects: 1024,
+                    user_mappings: 1024,
+                    ..LIMITS
+                }
+            } else {
+                LIMITS
+            },
         )
         .map_err(show)?;
         let group = create_task_group(factory, domain.as_handle_ref()).map_err(show)?;
