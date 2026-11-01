@@ -5,41 +5,40 @@ bin = [{name = "hyper-fs-backend-system", path = "src/main.rs", test = false, be
 
 [package]
 name = "hyper-fs-backend-system"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/HypeR-Proj/fs-backend"
 publish = false
-workspace = "../../app"
 
 [dependencies]
 
 [dependencies.hyper-block]
-workspace = true
+path = "../../lib/block"
 
 [dependencies.serde]
-workspace = true
+version = "1"
 features = ["derive"]
 
 [dependencies.serde_json]
-workspace = true
+version = "1"
 
 [dependencies.hyper-os]
-workspace = true
+version = "=0.0.0"
 features = ["std"]
 
 [dependencies.hyper-rt]
-workspace = true
+version = "=0.0.0"
 features = ["std"]
 
 [dependencies.hyper-service]
-workspace = true
+path = "../../lib/service"
 
 [dependencies.hyper-filesystem]
-workspace = true
+version = "=0.0.0"
 
 [dependencies.hyper-component]
-workspace = true
+path = "../../lib/component"
 
 [lints]
 
@@ -64,3 +63,19 @@ check-cfg = ["cfg(target_os, values(\"hyper\"))"]
 
 [lib]
 name = "hyper_fs_backend"
+
+[workspace]
+resolver = "3"
+members = []
+
+[profile]
+
+[profile.release]
+codegen-units = 1
+debug = 1
+incremental = false
+lto = "fat"
+opt-level = "s"
+overflow-checks = true
+panic = "abort"
+strip = "none"
