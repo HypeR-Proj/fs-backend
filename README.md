@@ -24,3 +24,10 @@ The manager recognizes F2FS superblocks and starts
 `/svc/fs-f2fs` when that optional worker is installed. It preserves the ordinary
 worker memory ceiling while admitting the media cache's additional heap mappings.
 F2FS volumes participate in the same handoff and mount-table protocol.
+
+## Control admission
+
+A malformed control request or rejected matched transfer is discarded without
+withdrawing the shared mount listener. Receiver invocation and endpoint failures
+are returned to the service owner. An accepted private mount handshake remains
+separate from the public transfer and owns its temporary connection resources.

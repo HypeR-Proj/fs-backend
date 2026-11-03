@@ -74,23 +74,9 @@ fn run() -> Result<(), String> {
         )];
         let message = match control.receive(hyper_os::DEADLINE_INFINITE, &mut record, &mut slots) {
             Ok(message) => message,
-            Err(hyper_os::Error::ReceiveRejected(rejection))
-                if matches!(
-                    rejection,
-                    hyper_os::ReceiveRejection::Capacity { .. }
-                        | hyper_os::ReceiveRejection::Status(
-                            hyper_os::Status::INVALID_ARGUMENT
-                                | hyper_os::Status::BAD_HANDLE
-                                | hyper_os::Status::ACCESS_DENIED
-                                | hyper_os::Status::FAULT
-                        )
-                ) =>
-            {
-                // This exact matched transaction installed no capabilities.
-                // Receiver-local faults must not masquerade as malformed input.
-                eprintln!("HypeR fs-backend: rejected control message: {rejection:?}");
-                continue;
-            }
+            // Only a matched transaction was rolled back. Invocation and
+            // endpoint failures still reach the service owner below.
+            Err(hyper_os::Error::ReceiveRejected(_)) => continue,
             Err(error) => return Err(show(error)),
         };
         if message.bytes() != filesystem::CONTROL_CONNECT || message.capability_count() != 1 {
