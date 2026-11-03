@@ -3,6 +3,7 @@
 
 //! Filesystem deployment configuration and runtime worker selection.
 
+pub mod admission;
 pub mod config;
 pub mod worker;
 

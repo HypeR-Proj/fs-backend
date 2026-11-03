@@ -31,3 +31,10 @@ A malformed control request or rejected matched transfer is discarded without
 withdrawing the shared mount listener. Receiver invocation and endpoint failures
 are returned to the service owner. An accepted private mount handshake remains
 separate from the public transfer and owns its temporary connection resources.
+
+At most eight private first-command workers run concurrently. Each has a
+five-second deadline measured from public admission, and completed commands enter
+an eight-entry queue. Excess handshakes receive a best-effort capacity error and
+close. Expiry or peer closure releases the worker and connection. The manager
+alone executes commands and mutates mount state. Global bounds do not provide
+per-client fairness. Dropping the listener cancels and joins all pending workers.
