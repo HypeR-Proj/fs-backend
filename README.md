@@ -42,3 +42,16 @@ per-client fairness. Dropping the listener cancels and joins all pending workers
 Control replies use a finite five-second send deadline. A client which fills its
 return queue and stops reading cannot retain the mount-state owner indefinitely.
 Expiry closes that private reply connection and does not undo an applied command.
+
+## Cancellation and partial mount results
+
+The mount owner checks a private client's closure after dequeue and after
+read-only preparation, before creating directories or starting a worker. That
+check accepts one mount operation. Unmount checks before namespace detachment.
+After acceptance, loss of the reply does not undo the operation or bypass worker
+and media retirement. Inspect `mount` and the requested target before retrying.
+
+`mount -a` is a sequence of independent entries, not a transaction. Earlier
+mounts survive a later error or client cancellation; closure stops accepting
+subsequent entries. Retrying the same table skips matching live mounts; it must
+not assume that an error or timeout rolled back earlier entries.

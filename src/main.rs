@@ -66,7 +66,12 @@ fn run() -> Result<(), String> {
         let admission::Request { connection, bytes } = listener.receive().map_err(show)?;
         let result = filesystem::control::decode(&bytes)
             .ok_or_else(|| "invalid mount command".to_string())
-            .and_then(|request| manager.command(request));
+            .and_then(|request| {
+                manager.command(
+                    request,
+                    &admission::Publication::requested(connection.as_handle_ref()),
+                )
+            });
         let response = match result {
             Ok(text) => format!("OK\n{text}"),
             Err(error) => format!("ERROR\n{error}"),
