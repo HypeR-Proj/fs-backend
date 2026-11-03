@@ -4,6 +4,7 @@
 //! Resident mount manager. Exclusive media moves to one format worker per
 //! mounted volume; filesystem requests bypass this control plane entirely.
 
+use hyper_fs_backend::admission;
 mod manager;
 mod migration;
 mod monitor;
@@ -11,13 +12,7 @@ mod process;
 
 use hyper_fs_backend::format;
 
-use core::mem::MaybeUninit;
-use hyper_os::{
-    capability_channel::CapabilityReceiveSlot,
-    fs::Directory,
-    handle::{ByteChannelObject, Rights},
-    startup,
-};
+use hyper_os::{fs::Directory, startup};
 use hyper_service::filesystem;
 
 fn show(error: impl core::fmt::Debug) -> String {
@@ -65,45 +60,13 @@ fn run() -> Result<(), String> {
         volumes: Vec::new(),
         monitor,
     };
-    let adoption = migration::adopt(&mut manager)?;
-    let control = &adoption.control;
-    let mut record = [MaybeUninit::uninit(); filesystem::ATTACH_BYTES];
+    let (control, _adoption) = migration::adopt(&mut manager)?;
+    let listener = admission::Listener::start(control).map_err(show)?;
     loop {
-        let mut slots = [CapabilityReceiveSlot::new::<ByteChannelObject>(
-            Rights::READ.union(Rights::WRITE).union(Rights::WAIT),
-        )];
-        let message = match control.receive(hyper_os::DEADLINE_INFINITE, &mut record, &mut slots) {
-            Ok(message) => message,
-            // Only a matched transaction was rolled back. Invocation and
-            // endpoint failures still reach the service owner below.
-            Err(hyper_os::Error::ReceiveRejected(_)) => continue,
-            Err(error) => return Err(show(error)),
-        };
-        if message.bytes() != filesystem::CONTROL_CONNECT || message.capability_count() != 1 {
-            continue;
-        }
-        let Some(connection) = slots[0].take::<ByteChannelObject>().map_err(show)? else {
-            continue;
-        };
-        let result = (|| {
-            hyper_os::wait::wait_many(
-                &[hyper_os::wait::WaitItem::new(
-                    connection.as_handle_ref(),
-                    hyper_os::wait::ObjectSignals::<ByteChannelObject>::READABLE
-                        .union(hyper_os::wait::ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-                )],
-                deadline()?,
-            )
-            .map_err(show)?;
-            let mut bytes = vec![0; filesystem::control::MAX_BYTES];
-            let count = connection
-                .as_byte_channel()
-                .try_receive(&mut bytes)
-                .map_err(show)?;
-            let request =
-                filesystem::control::decode(&bytes[..count]).ok_or("invalid mount command")?;
-            manager.command(request)
-        })();
+        let admission::Request { connection, bytes } = listener.receive().map_err(show)?;
+        let result = filesystem::control::decode(&bytes)
+            .ok_or_else(|| "invalid mount command".to_string())
+            .and_then(|request| manager.command(request));
         let response = match result {
             Ok(text) => format!("OK\n{text}"),
             Err(error) => format!("ERROR\n{error}"),

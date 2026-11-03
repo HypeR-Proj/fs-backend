@@ -26,11 +26,12 @@ const READY: StartupPurpose<ByteChannelObject> = StartupPurpose::new(0x8008_0020
 const OWNERS: StartupPurpose<CapabilityChannelObject> = StartupPurpose::new(0x8008_0021);
 
 pub(super) struct AdoptedManager {
-    pub control: CapabilityChannel,
     _unretired_predecessors: Vec<Option<OwnedHandle<ProcessObject>>>,
 }
 
-pub(super) fn adopt(manager: &mut Manager<'_>) -> Result<AdoptedManager, String> {
+pub(super) fn adopt(
+    manager: &mut Manager<'_>,
+) -> Result<(CapabilityChannel, AdoptedManager), String> {
     let descriptor = manager.startup.take(transfer::DESCRIPTION).map_err(show)?;
     let snapshot = SnapshotVmo::from_vmo(descriptor.as_handle_ref()).map_err(show)?;
     let mut length = [0; 8];
@@ -197,10 +198,12 @@ pub(super) fn adopt(manager: &mut Manager<'_>) -> Result<AdoptedManager, String>
         eprintln!("HypeR fs-backend: ownership adopted, readiness receiver unavailable: {error:?}");
     }
     println!("HypeR fs-backend: filesystem ownership adopted");
-    Ok(AdoptedManager {
+    Ok((
         control,
-        _unretired_predecessors: predecessors,
-    })
+        AdoptedManager {
+            _unretired_predecessors: predecessors,
+        },
+    ))
 }
 
 fn export_predecessors(
