@@ -5,19 +5,37 @@ SPDX-License-Identifier: Apache-2.0
 
 # fs-backend
 
-A HypeR component. See [HypeR](https://github.com/HypeR-Proj/HypeR) for
-workspace setup and the installed SDK build boundary.
+Resident filesystem mount manager.
 
-## Workspace tests
+Owns mount configuration, worker selection, admission and publication. Each mounted
+volume transfers exclusive media to one format worker; ordinary file requests bypass
+this control plane.
 
-Use the [HypeR workspace](https://github.com/HypeR-Proj/HypeR) to resolve dependencies:
+See the [implementation entry](src/main.rs) and [component declaration](component.json)
+for the public interfaces, build dependencies and delivered artifacts.
+
+## Boundaries
+
+Workers implement media semantics. Mount and unmount require manager authority; open
+references and nested mounts can prevent graceful detach. Bootstrap has a separate
+static implementation rather than a dependency on this repository.
+
+## Build and test
+
+Use this checkout inside the [repo-managed workspace](https://github.com/HypeR-Proj/HypeR).
+From this repository directory:
 
 ```sh
-python3 project.py test fs-backend
+make
+make test
 ```
 
-Paths in the documentation are relative to the repo-managed workspace root.
-Edit this repository and prepare the workspace again before building.
+An absolute `OUT=/path/to/out` selects a shared output directory. The module
+entry delegates to build/system, which prepares the installed SDK and declared
+dependencies. Native binaries require HypeR; host module checks cover the tests
+selected by component.json. A standalone clone does not contain the workspace’s
+other source repositories or Native SDK.
+
 
 
 The manager recognizes F2FS superblocks and starts
