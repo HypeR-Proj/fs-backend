@@ -139,6 +139,11 @@ impl Manager<'_> {
         if format == Format::Erofs && !entry.read_only {
             return Err("EROFS requires -o ro".into());
         }
+        // Reject unsupported access modes before transferring the sole block
+        // connection to a worker. A denied mount must remain retryable.
+        if format == Format::F2fs && entry.read_only {
+            return Err("F2FS read-only mounts are not supported".into());
+        }
         // Missing workers leave the sole block here, so installing the driver
         // later permits retrying this same volume without a new activation.
         let program = worker::open(&config, format, &entry.target, |source, path| {
