@@ -38,3 +38,7 @@ an eight-entry queue. Excess handshakes receive a best-effort capacity error and
 close. Expiry or peer closure releases the worker and connection. The manager
 alone executes commands and mutates mount state. Global bounds do not provide
 per-client fairness. Dropping the listener cancels and joins all pending workers.
+
+Control replies use a finite five-second send deadline. A client which fills its
+return queue and stops reading cannot retain the mount-state owner indefinitely.
+Expiry closes that private reply connection and does not undo an applied command.
