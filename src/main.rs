@@ -74,19 +74,21 @@ fn run() -> Result<(), String> {
         )];
         let message = match control.receive(hyper_os::DEADLINE_INFINITE, &mut record, &mut slots) {
             Ok(message) => message,
-            Err(hyper_os::Error::Status(status))
+            Err(hyper_os::Error::ReceiveRejected(rejection))
                 if matches!(
-                    status,
-                    hyper_os::Status::INVALID_ARGUMENT
-                        | hyper_os::Status::BAD_HANDLE
-                        | hyper_os::Status::ACCESS_DENIED
-                        | hyper_os::Status::BUFFER_TOO_SMALL
-                        | hyper_os::Status::FAULT
+                    rejection,
+                    hyper_os::ReceiveRejection::Capacity { .. }
+                        | hyper_os::ReceiveRejection::Status(
+                            hyper_os::Status::INVALID_ARGUMENT
+                                | hyper_os::Status::BAD_HANDLE
+                                | hyper_os::Status::ACCESS_DENIED
+                                | hyper_os::Status::FAULT
+                        )
                 ) =>
             {
-                // A rejected sender transaction installs no capabilities and
-                // must not terminate unrelated mounted filesystem workers.
-                eprintln!("HypeR fs-backend: rejected control message: {status:?}");
+                // This exact matched transaction installed no capabilities.
+                // Receiver-local faults must not masquerade as malformed input.
+                eprintln!("HypeR fs-backend: rejected control message: {rejection:?}");
                 continue;
             }
             Err(error) => return Err(show(error)),
