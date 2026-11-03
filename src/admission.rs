@@ -5,7 +5,7 @@
 
 use core::mem::MaybeUninit;
 use hyper_os::capability_channel::{CapabilityChannel, CapabilityReceiveSlot};
-use hyper_os::handle::{ByteChannelObject, OwnedHandle, Rights};
+use hyper_os::handle::{ByteChannelObject, HandleRef, OwnedHandle, Rights};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_os::{Error, Result, Status};
 use hyper_service::filesystem;
@@ -20,6 +20,35 @@ use std::time::Duration;
 const HANDSHAKES: usize = 8;
 const FIRST_COMMAND_SECONDS: u64 = 5;
 const CANCEL_POLL: Duration = Duration::from_millis(250);
+
+/// Cancellation is checked before each mount/unmount is accepted. Later
+/// disconnect cannot discard a worker or its exclusive media ownership.
+pub struct Publication<'a> {
+    peer: Option<HandleRef<'a, ByteChannelObject>>,
+}
+
+impl<'a> Publication<'a> {
+    pub fn requested(peer: HandleRef<'a, ByteChannelObject>) -> Self {
+        Self { peer: Some(peer) }
+    }
+
+    pub fn check(&self) -> Result<()> {
+        let Some(peer) = self.peer else {
+            return Ok(());
+        };
+        match wait_many(
+            &[WaitItem::new(
+                peer,
+                ObjectSignals::<ByteChannelObject>::PEER_CLOSED,
+            )],
+            0,
+        ) {
+            Ok(_) => Err(Error::Status(Status::CANCELLED)),
+            Err(Error::Status(Status::TIMED_OUT)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
 
 pub struct Request {
     pub connection: OwnedHandle<ByteChannelObject>,

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::admission::Publication;
 use crate::format::{self as driver, Format, PROBE_BYTES};
 use crate::{filesystem_error, process::Worker, show};
 use hyper_fs_backend::{
@@ -43,9 +44,14 @@ impl Manager<'_> {
         fstab::load(&self.root, table)
     }
 
-    fn mount_all(&mut self, entries: &[Entry]) -> Result<String, String> {
+    fn mount_all(
+        &mut self,
+        entries: &[Entry],
+        publication: &Publication<'_>,
+    ) -> Result<String, String> {
         let mut failures = Vec::new();
         for entry in entries.iter().filter(|entry| entry.automatic) {
+            publication.check().map_err(show)?;
             let existing = self.volumes.iter().find_map(|volume| {
                 volume
                     .matches(&entry.source)
@@ -60,7 +66,7 @@ impl Manager<'_> {
             let result = if let Some(worker) = existing {
                 worker.observation.require_running()
             } else {
-                self.mount(entry)
+                self.mount(entry, publication)
             };
             if let Err(error) = result {
                 eprintln!(
@@ -78,7 +84,7 @@ impl Manager<'_> {
             Err(failures.join("; "))
         }
     }
-    fn mount(&mut self, entry: &Entry) -> Result<(), String> {
+    fn mount(&mut self, entry: &Entry, publication: &Publication<'_>) -> Result<(), String> {
         let config = Config::load(&self.environment)?;
         if hyper_block::Selector::parse(&entry.source).is_none()
             || !hyper_fs_backend::config::absolute_path(&entry.target)
@@ -142,15 +148,18 @@ impl Manager<'_> {
             };
             directory.open(path, hyper_service::process::EXECUTABLE_FILE_RIGHTS)
         })?;
-        // An existing mountpoint needs no directory mutation. In particular,
-        // mounting a writable volume over an EROFS root must not try mkdir.
-        match std::fs::metadata(&entry.target) {
-            Ok(metadata) if metadata.is_dir() => {}
+        // Finish read-only preparation before accepting the operation: even
+        // metadata may wait for a filesystem worker or backing I/O.
+        let create_target = match std::fs::metadata(&entry.target) {
+            Ok(metadata) if metadata.is_dir() => false,
             Ok(_) => return Err("mount target is not a directory".into()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir_all(&entry.target).map_err(|error| error.to_string())?;
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
             Err(error) => return Err(error.to_string()),
+        };
+        publication.check().map_err(show)?;
+        // An existing mountpoint needs no mutation, including over EROFS.
+        if create_target {
+            std::fs::create_dir_all(&entry.target).map_err(|error| error.to_string())?;
         }
         let mut worker = Worker::start(
             &self.startup,
@@ -184,7 +193,7 @@ impl Manager<'_> {
             }
         }
     }
-    fn unmount(&mut self, target: &str) -> Result<String, String> {
+    fn unmount(&mut self, target: &str, publication: &Publication<'_>) -> Result<String, String> {
         if target == "/" {
             return Err("the active root filesystem cannot be unmounted".into());
         }
@@ -198,6 +207,7 @@ impl Manager<'_> {
                     .is_some_and(|worker| worker.target == target)
             })
             .ok_or("target is not managed by this filesystem service")?;
+        publication.check().map_err(show)?;
         // Failure (including Busy) leaves both namespace and worker in place.
         hyper_os::filesystem::unmount(self.root.as_handle_ref(), target)
             .map_err(|error| format!("{target}: {}", filesystem_error(error)))?;
@@ -207,7 +217,12 @@ impl Manager<'_> {
         })?);
         Ok(String::new())
     }
-    pub fn command(&mut self, request: Request<'_>) -> Result<String, String> {
+    pub fn command(
+        &mut self,
+        request: Request<'_>,
+        publication: &Publication<'_>,
+    ) -> Result<String, String> {
+        publication.check().map_err(show)?;
         match request {
             Request::List => {
                 // Root switching preserves mount identity, but a rejected
@@ -239,16 +254,16 @@ impl Manager<'_> {
             }
             Request::All { table } => {
                 let entries = self.load_table(table)?;
-                self.mount_all(&entries)
+                self.mount_all(&entries, publication)
             }
-            Request::Unmount { target } => self.unmount(target),
+            Request::Unmount { target } => self.unmount(target, publication),
             Request::Entry { table, name } => {
                 let entry = self
                     .load_table(table)?
                     .into_iter()
                     .find(|entry| entry.source == name || entry.target == name)
                     .ok_or("no matching fstab entry")?;
-                self.mount(&entry)?;
+                self.mount(&entry, publication)?;
                 Ok(String::new())
             }
             Request::Mount {
@@ -258,14 +273,17 @@ impl Manager<'_> {
                 options,
             } => {
                 let (read_only, automatic, required) = fstab::options(options)?;
-                self.mount(&Entry {
-                    source: source.into(),
-                    target: target.into(),
-                    format: fstab::format(format)?,
-                    read_only,
-                    automatic,
-                    required,
-                })?;
+                self.mount(
+                    &Entry {
+                        source: source.into(),
+                        target: target.into(),
+                        format: fstab::format(format)?,
+                        read_only,
+                        automatic,
+                        required,
+                    },
+                    publication,
+                )?;
                 Ok(String::new())
             }
         }
