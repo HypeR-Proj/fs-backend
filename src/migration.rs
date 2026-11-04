@@ -120,7 +120,7 @@ pub(super) fn adopt(
             let message = endpoint
                 .receive(deadline()?, &mut bytes, &mut slots)
                 .map_err(show)?;
-            if message.bytes().len() != 16
+            if message.bytes().len() != 24
                 || &message.bytes()[..8] != filesystem::WORKER_STATE
                 || message.capability_count() != 7
             {
