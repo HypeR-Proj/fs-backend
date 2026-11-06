@@ -100,6 +100,12 @@ pub(super) fn adopt(
             label: item.label,
             geometry,
             block: None,
+            last_target: worker
+                .as_ref()
+                .map_or_else(String::new, |worker| worker.target.clone()),
+            queue: None,
+            fault: None,
+            incident: None,
             worker,
         });
     }
@@ -126,7 +132,12 @@ pub(super) fn adopt(
             {
                 return Err("invalid mounted filesystem transfer".into());
             }
-            let mut block = slots[0].take::<NativeBlockObject>().map_err(show)?;
+            volume.block = Some(NativeBlock::from_handle(
+                slots[0]
+                    .take::<NativeBlockObject>()
+                    .map_err(show)?
+                    .ok_or("missing adopted volume authority")?,
+            ));
             let mut server = slots[1].take::<ByteChannelObject>().map_err(show)?;
             let mut shared = slots[2].take::<VmoObject>().map_err(show)?;
             let mut queue = slots[6].take::<BlockQueueObject>().map_err(show)?;
@@ -142,9 +153,15 @@ pub(super) fn adopt(
                 .take::<ProcessObject>()
                 .map_err(show)?
                 .ok_or("missing old filesystem worker")?;
+            volume.queue = Some(hyper_os::block::BlockQueue::from_handle(
+                queue
+                    .as_ref()
+                    .ok_or("missing adopted queue")?
+                    .duplicate(filesystem::QUEUE_RIGHTS)
+                    .map_err(show)?,
+            ));
             worker.adopt_transport(
                 message.bytes(),
-                &mut block,
                 &mut server,
                 &mut shared,
                 &mut queue,

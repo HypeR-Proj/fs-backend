@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Worker ownership transactions. Publication belongs to the manager, and a
-//! clean return transfers the original `NativeBlock` only after namespace detach.
+//! clean return acknowledges adapter drain only after namespace detach.
 
 use crate::format::Format;
 use crate::monitor::{Monitor, Registration};
@@ -11,11 +11,11 @@ use core::mem::MaybeUninit;
 use hyper_fs_backend::fstab::Entry;
 use hyper_fs_backend::worker::{Program, Source};
 use hyper_os::{
-    block::{NativeBlock, VolumeInfo},
+    block::VolumeInfo,
     capability_channel::{CapabilityChannel, CapabilityReceiveSlot},
     fs::{Directory, File},
     handle::{
-        BlockQueueObject, ByteChannelObject, NativeBlockObject, OwnedHandle, ProcessObject,
+        BlockQueueObject, ByteChannelObject, HandleRef, OwnedHandle, ProcessObject,
         ResourceDomainObject, Rights, RightsOffer, TaskGroupObject, VmoObject,
     },
     startup::{self, Startup},
@@ -74,10 +74,18 @@ impl Worker {
         format: Format,
         geometry: VolumeInfo,
         entry: &Entry,
-        block: &mut Option<NativeBlock>,
+        queue: HandleRef<'_, BlockQueueObject>,
     ) -> Result<Self, String> {
         Self::launch(
-            startup, root, monitor, program, format, geometry, entry, block, false,
+            startup,
+            root,
+            monitor,
+            program,
+            format,
+            geometry,
+            entry,
+            Some(queue),
+            false,
         )
     }
     pub(super) fn prepare(
@@ -90,7 +98,7 @@ impl Worker {
         entry: &Entry,
     ) -> Result<Self, String> {
         Self::launch(
-            startup, root, monitor, program, format, geometry, entry, &mut None, true,
+            startup, root, monitor, program, format, geometry, entry, None, true,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -102,7 +110,7 @@ impl Worker {
         format: Format,
         geometry: VolumeInfo,
         entry: &Entry,
-        block: &mut Option<NativeBlock>,
+        delegated_queue: Option<HandleRef<'_, BlockQueueObject>>,
         adopting: bool,
     ) -> Result<Self, String> {
         monitor.check_capacity()?;
@@ -243,19 +251,14 @@ impl Worker {
                 RightsOffer::Exact(Rights::READ.union(Rights::WAIT)),
             )
             .map_err(|error| show(error.error()))?;
-        // The exclusive block is the final setup transfer; failures before here
-        // retain it in the manager and are retryable without reactivation.
-        if !adopting {
-            let device = block.take().ok_or("volume already delegated")?;
-            if let Err(error) = builder.add_handle_move(
-                device.into_handle(),
-                filesystem::BLOCK.as_raw(),
-                RightsOffer::Exact(hyper_os::block::RIGHTS),
-            ) {
-                let (error, handle) = error.into_parts();
-                *block = Some(NativeBlock::from_handle(handle));
-                return Err(show(error));
-            }
+        if let Some(queue) = delegated_queue {
+            builder
+                .add_handle_duplicate(
+                    queue,
+                    filesystem::QUEUE.as_raw(),
+                    RightsOffer::Exact(filesystem::QUEUE_RIGHTS),
+                )
+                .map_err(show)?;
         }
         let retirement = builder
             .retain_on_exit(8 * 1024 * 1024, 10_000_000_000)
@@ -266,7 +269,13 @@ impl Worker {
                 .start()
                 .map_err(|failure| format!("worker start failed: {:?}", failure.error()))?,
         );
-        let observation = match monitor.register(child.clone(), retirement, format, &entry.target) {
+        let observation = match monitor.register(
+            child.clone(),
+            retirement,
+            format,
+            &entry.target,
+            &entry.source,
+        ) {
             Ok(observation) => observation,
             Err(error) => {
                 let _ = child.as_process_supervisor().request_stop();
@@ -305,6 +314,15 @@ impl Worker {
                 .take::<BlockQueueObject>()
                 .map_err(show)?
                 .ok_or("missing filesystem block queue")?;
+            if queue.basic_info().map_err(show)?.koid
+                != delegated_queue
+                    .ok_or("missing delegated queue")?
+                    .basic_info()
+                    .map_err(show)?
+                    .koid
+            {
+                return Err("worker returned a different block queue".into());
+            }
             Ok((Some(channel), Some(buffer), Some(queue)))
         })();
         let (channel, buffer, queue) = match prepared {
@@ -338,7 +356,7 @@ impl Worker {
         })
     }
     pub fn publish(&mut self, root: &Directory, read_only: bool) -> Result<(), String> {
-        hyper_os::filesystem::mount(
+        let id = hyper_os::filesystem::mount(
             self.channel
                 .as_ref()
                 .ok_or("missing filesystem transport")?
@@ -359,18 +377,7 @@ impl Worker {
         )
         .map_err(filesystem_error)?;
         self.published = true;
-        self.mount_id = Some(
-            root.open_directory(
-                &self.target,
-                hyper_os::fs::DirectoryRights::READ.union(hyper_os::fs::DirectoryRights::INSPECT),
-            )
-            .map_err(show)?
-            .info()
-            .map_err(show)?
-            .location()
-            .mount()
-            .get(),
-        );
+        self.mount_id = Some(id);
         println!(
             "HypeR fs-backend: {} mounted at {}",
             self.format.name(),
@@ -381,7 +388,6 @@ impl Worker {
     pub(super) fn adopt_transport(
         &mut self,
         record: &[u8],
-        block: &mut Option<OwnedHandle<NativeBlockObject>>,
         server: &mut Option<OwnedHandle<ByteChannelObject>>,
         shared: &mut Option<OwnedHandle<VmoObject>>,
         queue: &mut Option<OwnedHandle<BlockQueueObject>>,
@@ -394,8 +400,6 @@ impl Worker {
             .duplicate(filesystem::QUEUE_RIGHTS)
             .map_err(show)?;
         let mut offers = [
-            CapabilityDisposition::move_handle(block, RightsOffer::Exact(hyper_os::block::RIGHTS))
-                .map_err(show)?,
             CapabilityDisposition::move_handle(
                 server,
                 RightsOffer::Exact(filesystem::TRANSPORT_RIGHTS),
@@ -425,27 +429,35 @@ impl Worker {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<NativeBlock, String> {
+    pub fn finish(&mut self) -> Result<(), String> {
         self.observation.begin_stop()?;
         self.owner
             .as_byte_channel()
             .send(filesystem::WORKER_STOP)
             .map_err(show)?;
         let mut bytes = [MaybeUninit::uninit(); 16];
-        let mut slots = [CapabilityReceiveSlot::new::<NativeBlockObject>(
-            hyper_os::block::RIGHTS,
-        )];
         let message = self
             .control
-            .receive(deadline()?, &mut bytes, &mut slots)
+            .receive(deadline()?, &mut bytes, &mut [])
             .map_err(show)?;
-        if message.bytes() != filesystem::WORKER_RETURN || message.capability_count() != 1 {
-            return Err("worker did not return exclusive block ownership".into());
+        if message.bytes() != filesystem::WORKER_RETURN || message.capability_count() != 0 {
+            return Err("worker did not acknowledge teardown".into());
         }
-        let block = slots[0]
-            .take::<NativeBlockObject>()
-            .map_err(show)?
-            .ok_or("worker omitted block owner")?;
+        self.wait_retired()
+    }
+
+    pub fn stop_failed(&mut self) -> Result<(), String> {
+        self.observation.begin_stop()?;
+        if self.observation.info()?.terminal.is_none() {
+            self.child
+                .as_process_supervisor()
+                .request_stop()
+                .map_err(show)?;
+        }
+        self.wait_retired()
+    }
+
+    fn wait_retired(&self) -> Result<(), String> {
         let supervisor = self.child.as_process_supervisor();
         let retired_by = deadline()?;
         supervisor.wait_terminated(retired_by).map_err(show)?;
@@ -461,6 +473,6 @@ impl Worker {
             hyper_os::thread::sleep_until(now.saturating_add(1_000_000).min(retired_by))
                 .map_err(show)?;
         }
-        Ok(NativeBlock::from_handle(block))
+        Ok(())
     }
 }

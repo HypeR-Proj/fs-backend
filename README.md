@@ -8,8 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Resident filesystem mount manager.
 
 Owns mount configuration, worker selection, admission and publication. Each mounted
-volume transfers exclusive media to one format worker; ordinary file requests bypass
-this control plane.
+volume retains its exclusive NativeBlock in the manager and delegates one revocable
+BlockQueue to its format worker. Ordinary file requests bypass this control plane.
 
 See the [implementation entry](src/main.rs) and [component declaration](component.json)
 for the public interfaces, build dependencies and delivered artifacts.
@@ -73,3 +73,24 @@ and media retirement. Inspect `mount` and the requested target before retrying.
 mounts survive a later error or client cancellation; closure stops accepting
 subsequent entries. Retrying the same table skips matching live mounts; it must
 not assume that an error or timeout rolled back earlier entries.
+
+## Failed-provider recovery
+
+`umount --force TARGET` is an explicitly lossy recovery command for a permanently
+failed provider. Healthy providers, the namespace root and mounts containing nested
+mounts are refused. Ordinary `umount` still requires idle references and a successful
+synchronous flush; it never discards dirty pages to report success.
+
+The manager detaches the exact failed mount identity, records discarded VFS bytes
+(additional filesystem metadata loss remains unknown), stops and retires the worker,
+and revokes its queue. Only successful physical queue retirement permits a fresh
+queue and a later `mount`. Device failure, timeout or cancellation leaves the volume
+unavailable. Old references remain failed, and old queue aliases cannot submit into
+the replacement. NativeBlock never moves into a formal worker. Bootstrap transfers
+its original NativeBlock into this manager while the existing transport is adopted.
+
+Worker death and recovery stages produce authenticated CRITICAL diagnostics,
+independent of the component's critical setting. Reporting runs outside mount-control
+ownership; the component manager retains its direct Console fallback when journal
+or filesystem services fail. `mount` retains the latest recovery record per volume,
+including mount, volume, worker identity/generation, stage, loss and reuse status.

@@ -13,7 +13,7 @@ use hyper_os::{
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 const MAX_WORKERS: usize = 128;
@@ -33,6 +33,7 @@ pub(super) struct Observation {
     retirement: hyper_os::task::ProcessRetirement,
     name: &'static str,
     target: String,
+    volume: String,
     koid: u64,
     state: Mutex<State>,
     owner_released: AtomicBool,
@@ -103,8 +104,8 @@ impl Observation {
 
     fn failure(&self, reason: ProcessTermination) -> String {
         format!(
-            "{} process=0x{:x} terminated: {reason:?}; mount={:?}",
-            self.name, self.koid, self.target
+            "{} process=0x{:x} mount={:?} cause={reason:?} generation=0x{:x} stage=provider-death loss=unknown recovery=unavailable volume={}",
+            self.name, self.koid, self.target, self.koid, self.volume
         )
     }
 
@@ -156,7 +157,16 @@ impl Drop for Registration {
     }
 }
 
+#[derive(Clone)]
+struct FaultReport {
+    message: String,
+    notified: bool,
+    logged: bool,
+}
+
 pub(super) struct Monitor {
+    faults: Arc<Mutex<Vec<FaultReport>>>,
+    lost_reports: Arc<AtomicU64>,
     workers: Arc<Mutex<Vec<Arc<Observation>>>>,
     wake: Arc<OwnedHandle<ByteChannelObject>>,
 }
@@ -176,20 +186,48 @@ impl Monitor {
         let (wake, reader) = hyper_os::channel::create_pair().map_err(show)?;
         let workers = Arc::new(Mutex::new(Vec::new()));
         let observed = workers.clone();
+        let faults = Arc::new(Mutex::new(Vec::new()));
+        let observed_faults = faults.clone();
+        let lost_reports = Arc::new(AtomicU64::new(0));
+        let observed_lost = lost_reports.clone();
         std::thread::Builder::new()
             .name("filesystem-workers".into())
             .spawn(move || {
-                if let Err(error) = observe(observed, reader, connector) {
+                if let Err(error) =
+                    observe(observed, observed_faults, observed_lost, reader, connector)
+                {
                     // Reporting failure must not tear down healthy root/media
                     // ownership. Direct mount queries still inspect Processes.
-                    eprintln!("HypeR fs-backend: worker monitoring failed: {error}");
+                    eprintln!("CRITICAL: HypeR fs-backend: worker monitoring failed: {error}");
                 }
             })
             .map_err(show)?;
         Ok(Self {
+            faults,
+            lost_reports,
             workers,
             wake: Arc::new(wake),
         })
+    }
+
+    /// Queue diagnostics independently of mount control and journal backpressure.
+    /// The manager also retains the latest full record on each Volume.
+    pub fn report_fault(&self, message: &str) {
+        if let Ok(mut reports) = self.faults.lock() {
+            if reports.iter().any(|report| report.message == message) {
+                return;
+            }
+            if reports.len() == MAX_WORKERS * 4 {
+                reports.remove(0);
+                self.lost_reports.fetch_add(1, Ordering::Relaxed);
+            }
+            reports.push(FaultReport {
+                message: message.into(),
+                notified: false,
+                logged: false,
+            });
+        }
+        let _ = self.wake.as_byte_channel().try_send(&[1]);
     }
 
     pub fn register(
@@ -198,6 +236,7 @@ impl Monitor {
         retirement: hyper_os::task::ProcessRetirement,
         format: Format,
         target: &str,
+        volume: &str,
     ) -> Result<Registration, String> {
         let observation = Arc::new(Observation {
             koid: process.basic_info().map_err(show)?.koid.get(),
@@ -206,7 +245,8 @@ impl Monitor {
             name: format.worker_name(),
             // Component status is bounded to 256 characters; preserve room for
             // the process identity and termination reason even for a long path.
-            target: target.chars().take(64).collect(),
+            target: target.chars().take(48).collect(),
+            volume: volume.chars().take(48).collect(),
             state: Mutex::new(State::default()),
             owner_released: AtomicBool::new(false),
             wake: self.wake.clone(),
@@ -223,7 +263,7 @@ impl Monitor {
     }
 
     /// Only mount control registers workers; the observer can only remove
-    /// entries. Check before delegating exclusive media to a new Process.
+    /// entries. Check before delegating a volume queue to a new Process.
     pub fn check_capacity(&self) -> Result<(), String> {
         if self.workers.lock().map_err(show)?.len() >= MAX_WORKERS {
             return Err("filesystem worker observation limit exceeded".into());
@@ -234,6 +274,8 @@ impl Monitor {
 
 fn observe(
     registry: Arc<Mutex<Vec<Arc<Observation>>>>,
+    faults: Arc<Mutex<Vec<FaultReport>>>,
+    lost_reports: Arc<AtomicU64>,
     wake: OwnedHandle<ByteChannelObject>,
     connector: OwnedHandle<CapabilityChannelObject>,
 ) -> Result<(), String> {
@@ -242,11 +284,47 @@ fn observe(
     let mut last_failure = None;
     let mut scratch = [0; 128];
     loop {
+        let lost = lost_reports.load(Ordering::Relaxed);
+        if lost != 0 && hyper_component::connection::report_critical_failure(
+            connector.as_handle_ref(), &format!("filesystem recovery diagnostics overflow: {lost} records; latest incidents remain queryable with mount"),
+        ).is_ok() {
+            lost_reports.fetch_sub(lost, Ordering::Relaxed);
+        }
+        let reports = faults.lock().map_err(show)?.clone();
+        for mut report in reports {
+            if !report.notified {
+                report.notified = hyper_component::connection::report_critical_failure(
+                    connector.as_handle_ref(),
+                    &report.message,
+                )
+                .is_ok();
+            }
+            if !report.logged {
+                report.logged = stderr
+                    .as_byte_channel()
+                    .try_send(
+                        format!("CRITICAL: HypeR fs-backend: {}\n", report.message).as_bytes(),
+                    )
+                    .is_ok();
+            }
+            let mut pending = faults.lock().map_err(show)?;
+            if let Some(index) = pending
+                .iter()
+                .position(|item| item.message == report.message)
+            {
+                if report.notified && report.logged {
+                    pending.remove(index);
+                } else {
+                    pending[index] = report;
+                }
+            }
+        }
         while wake.as_byte_channel().try_receive(&mut scratch).is_ok() {}
         let workers = registry.lock().map_err(show)?.clone();
         let mut live = Vec::new();
         let mut failures = Vec::new();
-        let mut retry = false;
+        let mut retry =
+            !faults.lock().map_err(show)?.is_empty() || lost_reports.load(Ordering::Relaxed) != 0;
         for worker in &workers {
             let failure = match worker.info() {
                 Ok(info) => {
@@ -277,7 +355,7 @@ fn observe(
                 if !notified {
                     // The parent manager retains a direct Console path even
                     // when the root filesystem or journal has failed.
-                    if hyper_component::connection::report_failure(
+                    if hyper_component::connection::report_critical_failure(
                         connector.as_handle_ref(),
                         &failure,
                     )
@@ -290,7 +368,7 @@ fn observe(
                 }
                 let sent = worker.state.lock().map_err(show)?.logged.as_ref() == Some(&failure);
                 if !sent {
-                    let record = format!("HypeR fs-backend: {failure}\n");
+                    let record = format!("CRITICAL: HypeR fs-backend: {failure}\n");
                     // Journal backpressure cannot block mount control or the
                     // observation of another worker's terminal state.
                     match stderr.as_byte_channel().try_send(record.as_bytes()) {
