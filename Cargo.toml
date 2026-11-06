@@ -64,6 +64,9 @@ check-cfg = ["cfg(target_os, values(\"hyper\"))"]
 [lib]
 name = "hyper_fs_backend"
 
+[features]
+block-queue-test = []
+
 [workspace]
 resolver = "3"
 members = []

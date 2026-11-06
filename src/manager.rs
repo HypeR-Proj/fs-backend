@@ -10,7 +10,7 @@ use hyper_fs_backend::{
     worker,
 };
 use hyper_os::{
-    block::{NativeBlock, VolumeInfo},
+    block::{BlockQueue, NativeBlock, QueueConfig, VolumeInfo},
     fs::Directory,
     startup::Startup,
 };
@@ -22,8 +22,58 @@ pub(super) struct Volume {
     pub(super) geometry: VolumeInfo,
     pub block: Option<NativeBlock>,
     pub(super) worker: Option<Worker>,
+    pub(super) queue: Option<BlockQueue>,
+    pub(super) last_target: String,
+    pub(super) fault: Option<String>,
+    pub(super) incident: Option<String>,
 }
 impl Volume {
+    fn retire_queue(&mut self) -> Result<(), String> {
+        if let Some(queue) = &self.queue {
+            self.block
+                .as_ref()
+                .ok_or("missing retained volume authority")?
+                .retire_queue(queue.as_handle_ref(), crate::deadline()?)
+                .map_err(show)?;
+            self.queue = None;
+        }
+        Ok(())
+    }
+
+    fn record_fault(
+        &mut self,
+        monitor: &crate::monitor::Monitor,
+        stage: &str,
+        cause: &str,
+        loss: &str,
+        recovery: &str,
+    ) -> String {
+        let process = self
+            .worker
+            .as_ref()
+            .and_then(|worker| worker.child.basic_info().ok())
+            .map_or(0, |info| info.koid.get());
+        let observation = self.worker.as_ref().map_or_else(String::new, |worker| {
+            worker
+                .observation
+                .detail()
+                .unwrap_or_else(|error| format!("observation unavailable: {error}"))
+        });
+        let origin = self
+            .incident
+            .get_or_insert_with(|| format!("stage={stage} cause={cause}"));
+        let report = format!(
+            "stage={stage} loss={loss} recovery={recovery} process=0x{process:x} generation=0x{process:x} volume={} mount={:?} cause={cause}; origin=[{origin}]; observation=[{observation}]",
+            self.id, self.last_target
+        );
+        if self.fault.as_ref() != Some(&report) {
+            // Keep a queryable record even after the retired worker disappears.
+            self.fault = Some(report.clone());
+            monitor.report_fault(&report);
+        }
+        report
+    }
+
     fn matches(&self, source: &str) -> bool {
         hyper_block::Selector::parse(source)
             .is_some_and(|selector| selector.matches(self.id, &self.label))
@@ -114,7 +164,7 @@ impl Manager<'_> {
             .iter_mut()
             .find(|volume| volume.matches(&entry.source))
             .ok_or_else(|| format!("unknown Native volume: {}", entry.source))?;
-        if volume.worker.is_some() {
+        if volume.worker.is_some() || volume.queue.is_some() {
             return Err(format!(
                 "{} already has an exclusive mounted owner",
                 entry.source
@@ -139,8 +189,7 @@ impl Manager<'_> {
         if format == Format::Erofs && !entry.read_only {
             return Err("EROFS requires -o ro".into());
         }
-        // Reject unsupported access modes before transferring the sole block
-        // connection to a worker. A denied mount must remain retryable.
+        // Reject unsupported access before delegating any queue to a worker.
         if format == Format::F2fs && entry.read_only {
             return Err("F2FS read-only mounts are not supported".into());
         }
@@ -166,7 +215,21 @@ impl Manager<'_> {
         if create_target {
             std::fs::create_dir_all(&entry.target).map_err(|error| error.to_string())?;
         }
-        let mut worker = Worker::start(
+        #[cfg(feature = "block-queue-test")]
+        crate::queue_probe::run(
+            block,
+            volume.geometry.sectors,
+            entry.read_only,
+            self.startup
+                .borrow(hyper_os::startup::ROOT_VMAR)
+                .map_err(show)?,
+        )?;
+        volume.last_target = entry.target.clone();
+        volume.queue = Some(block.create_queue(QueueConfig::default()).map_err(show)?);
+        // A new generation starts a new incident, while the last fault remains
+        // queryable until another failure replaces it.
+        volume.incident = None;
+        let worker = Worker::start(
             &self.startup,
             &self.root,
             &self.monitor,
@@ -174,29 +237,53 @@ impl Manager<'_> {
             format,
             volume.geometry,
             entry,
-            &mut volume.block,
-        )?;
-        match worker.publish(&self.root, entry.read_only) {
-            Ok(()) => {
-                volume.worker = Some(worker);
-                Ok(())
-            }
+            volume
+                .queue
+                .as_ref()
+                .ok_or("missing delegated queue")?
+                .as_handle_ref(),
+        );
+        let mut worker = match worker {
+            Ok(worker) => worker,
             Err(error) => {
-                // Publication may have committed before mount identity inspection
-                // failed. Keep that live provider; never drop its exclusive media.
-                if worker.published {
-                    volume.worker = Some(worker);
-                    return Err(error);
+                if let Err(retirement) = volume.retire_queue() {
+                    volume.record_fault(
+                        &self.monitor,
+                        "launch-retirement",
+                        &retirement,
+                        "unknown",
+                        "unavailable",
+                    );
                 }
-                match worker.finish() {
-                    Ok(block) => volume.block = Some(block),
-                    Err(cleanup) => {
-                        eprintln!("HypeR fs-backend: rejected mount cleanup: {cleanup}")
-                    }
-                }
-                Err(error)
+                return Err(error);
             }
+        };
+        let result = worker.publish(&self.root, entry.read_only);
+        volume.worker = Some(worker);
+        if let Err(error) = result {
+            // Keep the failed generation until both process and queue retirement
+            // are proven. A failed cleanup must not silently admit a replacement.
+            let cleanup = volume
+                .worker
+                .as_mut()
+                .ok_or("missing worker")?
+                .finish()
+                .and_then(|()| volume.retire_queue());
+            match cleanup {
+                Ok(()) => volume.worker = None,
+                Err(cause) => {
+                    volume.record_fault(
+                        &self.monitor,
+                        "publication-cleanup",
+                        &cause,
+                        "unknown",
+                        "unavailable",
+                    );
+                }
+            }
+            return Err(error);
         }
+        Ok(())
     }
     fn unmount(&mut self, target: &str, publication: &Publication<'_>) -> Result<String, String> {
         if target == "/" {
@@ -216,11 +303,85 @@ impl Manager<'_> {
         // Failure (including Busy) leaves both namespace and worker in place.
         hyper_os::filesystem::unmount(self.root.as_handle_ref(), target)
             .map_err(|error| format!("{target}: {}", filesystem_error(error)))?;
-        let worker = volume.worker.take().ok_or("missing mounted worker")?;
-        volume.block = Some(worker.finish().map_err(|error| {
-            format!("{target} detached, but volume ownership could not be recovered: {error}")
-        })?);
+        let worker = volume.worker.as_mut().ok_or("missing mounted worker")?;
+        worker.published = false;
+        let result = worker.finish().and_then(|()| volume.retire_queue());
+        if let Err(cause) = result {
+            return Err(volume.record_fault(
+                &self.monitor,
+                "graceful-retirement",
+                &cause,
+                "unknown",
+                "unavailable",
+            ));
+        }
+        volume.worker = None;
         Ok(String::new())
+    }
+
+    fn detach_failed(
+        &mut self,
+        target: &str,
+        publication: &Publication<'_>,
+    ) -> Result<String, String> {
+        if target == "/" {
+            return Err("the active root filesystem cannot be detached".into());
+        }
+        let volume = self
+            .volumes
+            .iter_mut()
+            .find(|volume| {
+                volume.last_target == target && (volume.worker.is_some() || volume.queue.is_some())
+            })
+            .ok_or("target has no managed failed generation")?;
+        publication.check().map_err(show)?;
+        let mut discarded = None;
+        if let Some(worker) = &mut volume.worker
+            && worker.published
+        {
+            let id = worker.mount_id.ok_or("missing failed mount identity")?;
+            // The kernel independently refuses a healthy provider, the root
+            // mount and nested mounts. No worker is killed before this gate.
+            discarded = Some(
+                hyper_os::filesystem::detach_failed(self.root.as_handle_ref(), id)
+                    .map_err(filesystem_error)?,
+            );
+            worker.published = false;
+        }
+        let loss = discarded.map_or_else(
+            || "unknown".into(),
+            |bytes| format!("vfs-bytes:{bytes};metadata:unknown"),
+        );
+        volume.record_fault(
+            &self.monitor,
+            "detached",
+            "explicit failed-provider recovery",
+            &loss,
+            "quarantined",
+        );
+        let retired = match &mut volume.worker {
+            Some(worker) => worker.stop_failed(),
+            None => Ok(()),
+        }
+        .and_then(|()| volume.retire_queue());
+        if let Err(cause) = retired {
+            return Err(volume.record_fault(
+                &self.monitor,
+                "queue-retirement",
+                &cause,
+                &loss,
+                "unavailable",
+            ));
+        }
+        let report = volume.record_fault(
+            &self.monitor,
+            "retired",
+            "old generation cannot submit I/O",
+            &loss,
+            "remount-allowed",
+        );
+        volume.worker = None;
+        Ok(format!("{report}\n"))
     }
     pub fn command(
         &mut self,
@@ -237,6 +398,10 @@ impl Manager<'_> {
                 let root_mount = self.root.info().map_err(show)?.location().mount().get();
                 let mut output = String::new();
                 for volume in &self.volumes {
+                    if let Some(fault) = &volume.fault {
+                        use std::fmt::Write;
+                        writeln!(output, "CRITICAL: {fault}").map_err(show)?;
+                    }
                     if let Some(worker) = &volume.worker {
                         use std::fmt::Write;
                         writeln!(
@@ -262,6 +427,7 @@ impl Manager<'_> {
                 self.mount_all(&entries, publication)
             }
             Request::Unmount { target } => self.unmount(target, publication),
+            Request::DetachFailed { target } => self.detach_failed(target, publication),
             Request::Entry { table, name } => {
                 let entry = self
                     .load_table(table)?

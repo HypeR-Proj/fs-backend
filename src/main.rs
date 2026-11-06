@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Resident mount manager. Exclusive media moves to one format worker per
-//! mounted volume; filesystem requests bypass this control plane entirely.
+//! Resident mount manager. Exclusive media ownership stays here; each worker
+//! receives one revocable queue. Filesystem requests bypass this control plane.
 
 use hyper_fs_backend::admission;
 mod manager;
 mod migration;
 mod monitor;
 mod process;
+#[cfg(feature = "block-queue-test")]
+#[path = "../../../tests/app/block-queue-probe.rs"]
+mod queue_probe;
 
 use hyper_fs_backend::format;
 
