@@ -41,6 +41,9 @@ other source repositories or Native SDK.
 The manager recognizes F2FS superblocks and starts
 `/svc/fs-f2fs` when that optional worker is installed. It preserves the ordinary
 worker memory ceiling while admitting the media cache's additional heap mappings.
+Its thread budget is five: the service actor, runtime thread reaper, ordered I/O
+executor, page-preparation executor and independent I/O completion owner. Other
+filesystem workers retain their four-thread ceiling.
 F2FS volumes participate in the same handoff and mount-table protocol.
 
 ## Control admission

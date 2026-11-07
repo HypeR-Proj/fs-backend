@@ -127,6 +127,9 @@ impl Worker {
                 // heap regions. Keep the existing byte/page ceilings, but admit
                 // their VMO/mapping objects within that same bounded memory.
                 ResourceLimits {
+                    // Actor + runtime reaper + ordered I/O executor + page
+                    // preparation executor + independent completion owner.
+                    threads: 5,
                     kernel_objects: 1024,
                     user_mappings: 1024,
                     ..LIMITS
